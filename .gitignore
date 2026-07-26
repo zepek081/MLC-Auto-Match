@@ -1,0 +1,10 @@
+venv/
+.env
+*.xlsx
+*.csv
+__pycache__/
+*.pyc
+
+# artefatti di debug Playwright/MCP: snapshot di pagina e screenshot del
+# portale, contengono dati dell'account (email, member id, royalties)
+.playwright-mcp/
