@@ -177,10 +177,48 @@ def abandon_stage2(page: Page) -> None:
         page.wait_for_timeout(300)
 
 
+# endpoint di ricerca dei due stage: Stage 1 GET .../search/unmatched-recordings,
+# Stage 2 POST .../search/works/catalog
+SEARCH_ENDPOINT_RE = re.compile(r"/search/(unmatched-recordings|works/catalog)")
+
+# la pagina ha finito di mostrare l'esito quando compare il messaggio di
+# "nessun risultato" oppure almeno un risultato/intestazione della lista
+RESULTS_RENDERED_JS = """() => {
+  const t = document.body.innerText;
+  return /couldn.?t locate any results|no results found/i.test(t)
+      || /Showing\\s+\\d+\\s*-\\s*\\d+\\s+of\\s+\\d+\\s+results/i.test(t)
+      || document.querySelectorAll('[data-testid="select-rg-button"]').length > 0
+      || document.querySelectorAll('#select-link').length > 0;
+}"""
+
+
 def run_search(page: Page) -> str:
-    """Esegue la ricerca. Ritorna 'no_results' oppure 'has_results'."""
-    page.get_by_role("button", name="Search").click()
-    page.wait_for_timeout(1200)  # margine per l'aggiornamento via XHR
+    """
+    Esegue la ricerca e attende che l'esito sia effettivamente a schermo.
+    Ritorna 'no_results' oppure 'has_results'.
+
+    Non si usa un'attesa a tempo fisso: con la pagina lenta (tipicamente la
+    prima ricerca dopo il login) i risultati non erano ancora renderizzati,
+    il codice contava zero pulsanti di selezione e classificava la riga come
+    'ambiguous_recording' pur essendo un caso normalissimo (osservato live
+    su ISRC CARH11900303, che rifatto a mano mostra 2 gruppi regolari).
+    Si aspetta prima la RISPOSTA DI RETE della ricerca - cosi' non si rischia
+    di leggere i risultati della ricerca precedente rimasti a schermo - e poi
+    il render vero e proprio.
+    """
+    try:
+        with page.expect_response(
+            lambda r: bool(SEARCH_ENDPOINT_RE.search(r.url)), timeout=30000
+        ):
+            page.get_by_role("button", name="Search").click()
+    except PWTimeout:
+        page.wait_for_timeout(1200)  # nessuna chiamata intercettata: margine di sicurezza
+
+    try:
+        page.wait_for_function(RESULTS_RENDERED_JS, timeout=15000)
+    except PWTimeout:
+        pass  # si prosegue comunque: la classificazione sotto gestisce anche il caso vuoto
+    page.wait_for_timeout(300)
 
     if page.get_by_text(NO_RESULTS_PATTERNS).count() > 0:
         return "no_results"

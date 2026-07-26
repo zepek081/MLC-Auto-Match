@@ -114,7 +114,8 @@ senza colore e richiedono la lettura della colonna `note`.
   segnalare al supporto MLC
 - `ambiguous_recording` - layout inatteso: nessun controllo di selezione
   trovato per l'ISRC (caso raro, i gruppi multipli vengono gia' gestiti
-  automaticamente selezionandoli tutti)
+  automaticamente selezionandoli tutti). Se capita su ISRC che rifatti a
+  mano funzionano, e' un problema di attesa: vedi punto 18
 - `ambiguous_work` - piu' di un'opera trovata con lo stesso titolo/criterio
   anche dopo il fallback su Writer, richiede scelta manuale (lo script si
   ferma e aspetta la tua selezione a schermo prima di continuare)
@@ -232,6 +233,15 @@ cambiare:
     History). Ora l'attesa di "Done" e' limitata a 15s e l'esito diventa
     `submit_failed` con nota esplicita, invece di 30s di timeout e un
     generico `error`.
+18. **Mai attese a tempo fisso dopo "Search"** (bug osservato live): con
+    1200ms fissi, sulla prima ricerca dopo il login i risultati non erano
+    ancora renderizzati, si contavano zero pulsanti di selezione e la riga
+    finiva in `ambiguous_recording` pur essendo normalissima (ISRC
+    `CARH11900303`, rifatto a mano: 2 gruppi regolari). `run_search` ora
+    attende la RISPOSTA DI RETE della ricerca (`/search/unmatched-recordings`
+    per lo Stage 1, `/search/works/catalog` per lo Stage 2) e poi il render:
+    aspettare la risposta nuova evita anche di leggere per sbaglio i
+    risultati della ricerca precedente rimasti a schermo.
 
 ## Sicurezza
 
