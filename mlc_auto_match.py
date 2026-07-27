@@ -46,6 +46,7 @@ Uso:
 import argparse
 import os
 import re
+import shutil
 import sys
 import time
 import unicodedata
@@ -75,6 +76,24 @@ ORANGE_FILL = PatternFill(start_color="FFC7A0", end_color="FFC7A0", fill_type="s
 GREEN_STATUSES = {"matched", "already_submitted"}
 YELLOW_STATUSES = {"no_match_recording", "no_match_work"}
 ORANGE_STATUSES = {"submit_failed", "manual_incomplete", "error"}
+
+# colori usati direttamente sul catalogo master: sono quelli gia' presenti
+# nel file dal lavoro manuale (giallo FFFF00, verde 00B050), non i toni piu'
+# tenui del report, cosi' il file resta coerente con quanto gia' colorato
+MASTER_VERDE = PatternFill(start_color="FF00B050", end_color="FF00B050", fill_type="solid")
+MASTER_GIALLO = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
+MASTER_ARANCIO = PatternFill(start_color="FFFFC000", end_color="FFFFC000", fill_type="solid")
+
+
+def _fill_per_stato(status: str):
+    """Colore da usare sul catalogo master, None se lo stato non va colorato."""
+    if status in GREEN_STATUSES:
+        return MASTER_VERDE
+    if status in YELLOW_STATUSES:
+        return MASTER_GIALLO
+    if status in ORANGE_STATUSES:
+        return MASTER_ARANCIO
+    return None
 
 
 @dataclass
@@ -731,6 +750,92 @@ def _color_report(path: str, df: pd.DataFrame) -> None:
     wb.save(path)
 
 
+@dataclass
+class Task:
+    """Una traccia da processare, con le righe del catalogo che la
+    rappresentano: lo stesso ISRC compare piu' volte quando ci sono piu'
+    coautori (56 casi su 402 nel catalogo Loose Club), e vanno colorate
+    tutte insieme."""
+    isrc: str
+    title: str
+    writer: str
+    publisher: str
+    righe: list
+
+
+def _riga_gia_colorata(ws, riga: int) -> bool:
+    """True se la riga e' gia' stata evasa in una sessione precedente (o a
+    mano): il catalogo usa il colore come stato di avanzamento."""
+    for cell in ws[riga]:
+        if cell.fill and cell.fill.patternType and cell.fill.fgColor.rgb not in (None, "00000000"):
+            return True
+    return False
+
+
+def carica_catalogo(path: str, sheet, isrc_col: str, title_col: str, writer_col: str,
+                    publisher_col: str, rifai_tutto: bool = False):
+    """
+    Legge il catalogo tenendo traccia dei numeri di riga, per poter poi
+    colorare il file stesso. Raggruppa per (ISRC, titolo) e salta cio' che
+    risulta gia' colorato, cosi' si puo' riprendere da dove si era arrivati.
+    Ritorna (workbook, worksheet, tasks_da_fare, n_gia_fatte).
+    """
+    wb = load_workbook(path)
+    ws = wb[sheet] if sheet else wb[wb.sheetnames[0]]
+
+    header = [c.value for c in ws[1]]
+    for col in (isrc_col, title_col):
+        if col not in header:
+            raise ValueError(f"Colonna '{col}' non trovata. Disponibili: {header}")
+
+    i_isrc, i_title = header.index(isrc_col), header.index(title_col)
+    i_writer = header.index(writer_col) if writer_col in header else None
+    i_pub = header.index(publisher_col) if publisher_col in header else None
+    testo = lambda v: str(v).strip() if v is not None else ""
+
+    tasks: dict = {}
+    for riga in range(2, ws.max_row + 1):
+        valori = [c.value for c in ws[riga]]
+        isrc, titolo = testo(valori[i_isrc]), testo(valori[i_title])
+        if not isrc:
+            continue
+
+        writer = testo(valori[i_writer]) if i_writer is not None else ""
+        pub = testo(valori[i_pub]) if i_pub is not None else ""
+
+        chiave = (isrc, titolo)
+        if chiave not in tasks:
+            tasks[chiave] = Task(isrc=isrc, title=titolo, writer=writer, publisher=pub, righe=[])
+        tasks[chiave].righe.append(riga)
+
+        # fra i coautori si tiene il writer della riga LOOSE CLUB EDITION:
+        # e' quello controllato da noi, l'unico utile come criterio di ricerca
+        if pub.upper().startswith("LOOSE CLUB") and writer:
+            tasks[chiave].writer = writer
+            tasks[chiave].publisher = pub
+
+    da_fare, gia_fatte = [], 0
+    for task in tasks.values():
+        if not rifai_tutto and all(_riga_gia_colorata(ws, r) for r in task.righe):
+            gia_fatte += 1
+        else:
+            da_fare.append(task)
+
+    return wb, ws, da_fare, gia_fatte
+
+
+def _colora_catalogo(wb, ws, path: str, task: Task, status: str) -> None:
+    """Colora tutte le righe della traccia e salva subito il catalogo, cosi'
+    l'avanzamento e' visibile anche a run in corso."""
+    fill = _fill_per_stato(status)
+    if fill is None:
+        return
+    for riga in task.righe:
+        for cell in ws[riga]:
+            cell.fill = fill
+    wb.save(path)
+
+
 def _save_report(path: str, results: list) -> pd.DataFrame:
     """
     Scrive il report su disco. Viene richiamato dopo OGNI riga, non solo a
@@ -756,6 +861,8 @@ def main():
     parser.add_argument("--output", default="mlc_match_results.xlsx")
     parser.add_argument("--headless", action="store_true", help="Esegui senza finestra browser visibile")
     parser.add_argument("--skip-ambigui", action="store_true", help="Salta anche la coda manuale di fine run: le righe ambigue restano segnate ambiguous_work nel report, da sistemare in un secondo momento")
+    parser.add_argument("--colora-catalogo", action="store_true", help="Colora direttamente il file di input riga per riga (con backup automatico) e riprende da dove si era arrivati, saltando cio' che e' gia' colorato")
+    parser.add_argument("--rifai-tutto", action="store_true", help="Con --colora-catalogo: riprocessa anche le righe gia' colorate")
     args = parser.parse_args()
 
     email = os.environ.get("MLC_EMAIL")
@@ -763,8 +870,23 @@ def main():
     if not email or not password:
         sys.exit("Imposta le variabili d'ambiente MLC_EMAIL e MLC_PASSWORD prima di avviare lo script.")
 
-    df = load_input(args.input_file, args.sheet, args.isrc_col, args.title_col, args.writer_col, args.publisher_col)
-    print(f"Righe da processare: {len(df)}")
+    wb = ws = None
+    if args.colora_catalogo:
+        # il catalogo e' il file di lavoro dell'utente: si lavora sempre su
+        # una copia di sicurezza fatta prima di toccarlo
+        backup = f"{Path(args.input_file).stem}.backup-{time.strftime('%Y%m%d-%H%M%S')}.xlsx"
+        shutil.copy2(args.input_file, backup)
+        print(f"Backup del catalogo: {backup}")
+
+        wb, ws, tasks, gia_fatte = carica_catalogo(
+            args.input_file, args.sheet, args.isrc_col, args.title_col,
+            args.writer_col, args.publisher_col, args.rifai_tutto)
+        print(f"Tracce nel catalogo: {len(tasks) + gia_fatte} | gia' evase (colorate): {gia_fatte} | da processare: {len(tasks)}")
+    else:
+        df = load_input(args.input_file, args.sheet, args.isrc_col, args.title_col, args.writer_col, args.publisher_col)
+        tasks = [Task(isrc=r["isrc"], title=r["title"], writer=r["writer"], publisher=r["publisher"], righe=[])
+                 for _, r in df.iterrows()]
+        print(f"Righe da processare: {len(tasks)}")
 
     results = []
     interrotto = False
@@ -776,42 +898,48 @@ def main():
 
             # Prima passata: nessuna pausa, cosi' il lotto gira da solo.
             # Le righe che richiedono un occhio umano vengono messe da parte.
-            for i, row in df.iterrows():
-                print(f"[{i + 1}/{len(df)}] ISRC={row['isrc']} Title={row['title']} Writer={row['writer']}")
-                r = process_row(page, row["isrc"], row["title"], row["writer"], row["publisher"], interattivo=False)
+            for i, task in enumerate(tasks, 1):
+                print(f"[{i}/{len(tasks)}] ISRC={task.isrc} Title={task.title} Writer={task.writer}")
+                r = process_row(page, task.isrc, task.title, task.writer, task.publisher, interattivo=False)
                 print(f"  -> {r.status} ({r.note})")
                 results.append(r)
                 _save_report(args.output, results)  # salvataggio dopo ogni riga
+                if ws is not None:
+                    _colora_catalogo(wb, ws, args.input_file, task, r.status)
 
             # Seconda passata: le sole righe ambigue, tutte in coda, quando il
             # grosso del lavoro e' gia' fatto e salvato
-            da_rivedere = [r for r in results if r.status == "ambiguous_work"]
+            da_rivedere = [(t, r) for t, r in zip(tasks, results) if r.status == "ambiguous_work"]
             if da_rivedere and not args.skip_ambigui:
                 print(f"\n{'=' * 60}")
-                print(f"Restano {len(da_rivedere)} righe da scegliere a mano.")
+                print(f"Restano {len(da_rivedere)} tracce da scegliere a mano.")
                 print(f"{'=' * 60}")
-                for n, r in enumerate(da_rivedere, 1):
+                for n, (task, r) in enumerate(da_rivedere, 1):
                     print(f"\n[manuale {n}/{len(da_rivedere)}] ISRC={r.isrc} Title={r.title}")
                     nuovo = process_row(page, r.isrc, r.title, r.writer, r.publisher, interattivo=True)
                     print(f"  -> {nuovo.status} ({nuovo.note})")
                     r.status, r.note = nuovo.status, nuovo.note
                     _save_report(args.output, results)
+                    if ws is not None:
+                        _colora_catalogo(wb, ws, args.input_file, task, r.status)
             elif da_rivedere:
-                print(f"\n{len(da_rivedere)} righe ambigue lasciate da rivedere a mano (--skip-ambigui).")
+                print(f"\n{len(da_rivedere)} tracce ambigue lasciate da rivedere a mano (--skip-ambigui).")
 
             browser.close()
     except KeyboardInterrupt:
         interrotto = True
-        print("\nInterrotto: i risultati delle righe gia' processate sono stati salvati.")
+        print("\nInterrotto: i risultati delle tracce gia' processate sono stati salvati.")
 
     out_df = _save_report(args.output, results)
     if out_df.empty:
-        print("\nNessuna riga processata, report non scritto.")
+        print("\nNessuna traccia processata, report non scritto.")
         return
 
     print(f"\nReport salvato in: {args.output}")
+    if args.colora_catalogo:
+        print(f"Catalogo aggiornato coi colori: {args.input_file}")
     if interrotto:
-        print(f"Righe processate: {len(results)} su {len(df)}")
+        print(f"Tracce processate: {len(results)} su {len(tasks)}")
     print(out_df["status"].value_counts())
 
 

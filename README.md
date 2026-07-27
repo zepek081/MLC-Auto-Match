@@ -91,6 +91,30 @@ Il report viene riscritto **dopo ogni riga**, non solo a fine run: su lotti
 lunghi un Ctrl+C o un crash non fa perdere il lavoro gia' fatto. Se
 interrompi, il file contiene le righe processate fino a quel momento.
 
+## Lavorare direttamente sul catalogo master
+
+```
+python mlc_auto_match.py "mlc spreadsheet.xlsx" --colora-catalogo --output report.xlsx
+```
+
+Con `--colora-catalogo` lo script colora **il file di input stesso**, riga
+per riga, cosi' si vede a colpo d'occhio a che punto e' il catalogo nel
+complesso invece di doverlo ricostruire dai report dei singoli lotti.
+
+- **Backup automatico** prima di toccare il file
+  (`<nome>.backup-AAAAMMGG-HHMMSS.xlsx`): il catalogo e' il file di lavoro,
+  non lo si modifica senza rete
+- **Riprende da dove si era arrivati**: le tracce le cui righe sono gia'
+  colorate vengono saltate, comprese quelle colorate a mano in passato.
+  Si puo' interrompere e rilanciare quando si vuole. Con `--rifai-tutto` si
+  riprocessa comunque tutto
+- **Colori del catalogo**: verde `00B050` e giallo `FFFF00`, gli stessi gia'
+  usati nel file a mano, piu' arancione `FFC000` per i tentativi falliti
+- Lo stesso ISRC su piu' righe (coautori) viene processato una volta sola e
+  tutte le sue righe vengono colorate insieme. Come cognome autore si usa
+  quello della riga LOOSE CLUB EDITION, l'unico utile come criterio di
+  ricerca
+
 ## Stati possibili nel report
 
 Il file Excel di output colora automaticamente ogni riga come nel flusso
