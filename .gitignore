@@ -8,3 +8,7 @@ __pycache__/
 # artefatti di debug Playwright/MCP: snapshot di pagina e screenshot del
 # portale, contengono dati dell'account (email, member id, royalties)
 .playwright-mcp/
+
+# copie di sicurezza del catalogo e report delle singole run
+backup/
+report/

@@ -94,20 +94,33 @@ interrompi, il file contiene le righe processate fino a quel momento.
 ## Lavorare direttamente sul catalogo master
 
 ```
-python mlc_auto_match.py "mlc spreadsheet.xlsx" --colora-catalogo --output report.xlsx
+python mlc_auto_match.py "mlc spreadsheet.xlsx" --colora-catalogo
 ```
 
-Con `--colora-catalogo` lo script colora **il file di input stesso**, riga
-per riga, cosi' si vede a colpo d'occhio a che punto e' il catalogo nel
-complesso invece di doverlo ricostruire dai report dei singoli lotti.
+Con `--colora-catalogo` il catalogo diventa **l'unico file da consultare**:
+oltre al colore, lo script vi scrive tre colonne in coda che dicono
+esattamente cosa e' successo a ogni traccia, senza dover aprire altro.
 
-- **Backup automatico** prima di toccare il file
-  (`<nome>.backup-AAAAMMGG-HHMMSS.xlsx`): il catalogo e' il file di lavoro,
-  non lo si modifica senza rete
-- **Riprende da dove si era arrivati**: le tracce le cui righe sono gia'
-  colorate vengono saltate, comprese quelle colorate a mano in passato.
-  Si puo' interrompere e rilanciare quando si vuole. Con `--rifai-tutto` si
-  riprocessa comunque tutto
+| Colonna | Contenuto |
+|---|---|
+| `MLC Stato` | l'esito (`matched`, `no_match_work`, `submit_failed`, ...) |
+| `MLC Note` | il dettaglio, con l'esito di ogni tentativo di ricerca |
+| `MLC Aggiornato` | quando la traccia e' stata lavorata |
+
+La cartella di lavoro resta pulita: le copie di sicurezza finiscono in
+`backup/`, i report delle singole run in `report/`. Nella cartella
+principale restano il catalogo e lo script.
+
+- **Backup automatico** in `backup/` prima di toccare il file: il catalogo e'
+  il file di lavoro, non lo si modifica senza rete
+- **Riprende da dove si era arrivati**: si saltano le tracce con un esito
+  definitivo (verde o giallo), comprese quelle colorate a mano prima che le
+  colonne esistessero. Quelle finite male - `submit_failed`, `error`,
+  `manual_incomplete` - vengono invece **ritentate**, perche' il problema era
+  tecnico e non un esito reale. Con `--rifai-tutto` si riprocessa tutto
+- **Ctrl+C si ferma con ordine**: la traccia in corso viene completata e poi
+  ci si ferma, invece di lasciare a meta' una selezione sul portale o la
+  scrittura di un file. Un secondo Ctrl+C esce subito
 - **Colori del catalogo**: verde `00B050` e giallo `FFFF00`, gli stessi gia'
   usati nel file a mano, piu' arancione `FFC000` per i tentativi falliti
 - Lo stesso ISRC su piu' righe (coautori) viene processato una volta sola e

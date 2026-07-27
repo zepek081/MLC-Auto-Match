@@ -47,6 +47,7 @@ import argparse
 import os
 import re
 import shutil
+import signal
 import sys
 import time
 import unicodedata
@@ -114,6 +115,11 @@ COOKIE_ACCEPT_ID = "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll"
 # limite di sicurezza per i cicli di selezione/deselezione dei gruppi, per
 # non rischiare loop infiniti se il DOM non si aggiorna come previsto
 MAX_GROUPS_PER_ISRC = 50
+
+# i file di servizio vanno in sottocartelle: nella cartella di lavoro deve
+# restare in vista il solo catalogo, che e' il file da consultare
+CARTELLA_BACKUP = "backup"
+CARTELLA_REPORT = "report"
 
 
 def _dismiss_cookies(page: Page) -> None:
@@ -781,13 +787,38 @@ class Task:
     righe: list
 
 
-def _riga_gia_colorata(ws, riga: int) -> bool:
-    """True se la riga e' gia' stata evasa in una sessione precedente (o a
-    mano): il catalogo usa il colore come stato di avanzamento."""
+# colonne aggiunte in coda al catalogo per renderlo autosufficiente: il
+# colore da' il colpo d'occhio, queste dicono esattamente cosa e' successo
+# senza dover aprire un secondo file
+COL_STATO = "MLC Stato"
+COL_NOTE = "MLC Note"
+COL_DATA = "MLC Aggiornato"
+COLONNE_ESITO = (COL_STATO, COL_NOTE, COL_DATA)
+
+# una traccia e' da rifare se il tentativo e' fallito per motivi tecnici
+# (rifiuto del portale, errore, scelta manuale lasciata a meta'): solo
+# verde e giallo sono esiti definitivi
+STATI_DEFINITIVI = GREEN_STATUSES | YELLOW_STATUSES
+
+
+def _riga_colorata(ws, riga: int) -> bool:
     for cell in ws[riga]:
         if cell.fill and cell.fill.patternType and cell.fill.fgColor.rgb not in (None, "00000000"):
             return True
     return False
+
+
+def _riga_gia_evasa(ws, riga: int, i_stato) -> bool:
+    """
+    True se la riga non va rilavorata. Vale lo stato scritto in colonna
+    quando c'e'; per le righe colorate a mano prima che le colonne
+    esistessero si guarda il colore, che era l'unico segnale disponibile.
+    """
+    if i_stato is not None:
+        stato = ws.cell(row=riga, column=i_stato + 1).value
+        if stato:
+            return str(stato).strip() in STATI_DEFINITIVI
+    return _riga_colorata(ws, riga)
 
 
 def carica_catalogo(path: str, sheet, isrc_col: str, title_col: str, writer_col: str,
@@ -809,6 +840,14 @@ def carica_catalogo(path: str, sheet, isrc_col: str, title_col: str, writer_col:
     i_isrc, i_title = header.index(isrc_col), header.index(title_col)
     i_writer = header.index(writer_col) if writer_col in header else None
     i_pub = header.index(publisher_col) if publisher_col in header else None
+
+    # le colonne di esito vengono create in coda se non ci sono ancora
+    for nome in COLONNE_ESITO:
+        if nome not in header:
+            header.append(nome)
+            ws.cell(row=1, column=len(header)).value = nome
+    i_stato = header.index(COL_STATO)
+
     testo = lambda v: str(v).strip() if v is not None else ""
 
     tasks: dict = {}
@@ -834,12 +873,45 @@ def carica_catalogo(path: str, sheet, isrc_col: str, title_col: str, writer_col:
 
     da_fare, gia_fatte = [], 0
     for task in tasks.values():
-        if not rifai_tutto and all(_riga_gia_colorata(ws, r) for r in task.righe):
+        if not rifai_tutto and all(_riga_gia_evasa(ws, r, i_stato) for r in task.righe):
             gia_fatte += 1
         else:
             da_fare.append(task)
 
-    return wb, ws, da_fare, gia_fatte
+    return wb, ws, header, da_fare, gia_fatte
+
+
+_stop_richiesto = False
+
+
+def _installa_stop_pulito() -> None:
+    """
+    Rende Ctrl+C una fermata ordinata invece di un'interruzione a meta'
+    lavoro: il primo lascia finire la traccia in corso (fermarsi a meta'
+    lascerebbe la pagina MLC con gruppi selezionati o un dialog aperto, e
+    puo' cadere durante la scrittura di un file), il secondo esce subito.
+    """
+    def handler(signum, frame):
+        global _stop_richiesto
+        if _stop_richiesto:
+            signal.signal(signal.SIGINT, signal.SIG_DFL)  # basta cortesie
+            raise KeyboardInterrupt
+        _stop_richiesto = True
+        print("\n>> Interruzione richiesta: finisco la traccia in corso e mi fermo.")
+        print(">> (premi Ctrl+C di nuovo per uscire subito, ma il file potrebbe restare a meta')")
+
+    signal.signal(signal.SIGINT, handler)
+
+
+def _pulisci_temporanei(*paths: str) -> None:
+    """Rimuove i file di appoggio rimasti da un'uscita brusca."""
+    for path in paths:
+        tmp = f"{path}.tmp.xlsx"
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def _salva_atomico(wb, path: str) -> None:
@@ -858,15 +930,26 @@ def _salva_atomico(wb, path: str) -> None:
     os.replace(tmp, path)
 
 
-def _colora_catalogo(wb, ws, path: str, task: Task, status: str) -> None:
-    """Colora tutte le righe della traccia e salva subito il catalogo, cosi'
-    l'avanzamento e' visibile anche a run in corso."""
-    fill = _fill_per_stato(status)
-    if fill is None:
-        return
+def _aggiorna_catalogo(wb, ws, header: list, path: str, task: Task, r: RowResult) -> None:
+    """
+    Scrive nel catalogo l'esito della traccia - colore per il colpo d'occhio,
+    piu' stato, nota e data - e salva subito, cosi' l'avanzamento e'
+    consultabile anche a run in corso e senza aprire un secondo file.
+    """
+    fill = _fill_per_stato(r.status)
+    c_stato = header.index(COL_STATO) + 1
+    c_note = header.index(COL_NOTE) + 1
+    c_data = header.index(COL_DATA) + 1
+    adesso = time.strftime("%Y-%m-%d %H:%M")
+
     for riga in task.righe:
-        for cell in ws[riga]:
-            cell.fill = fill
+        if fill is not None:
+            for cell in ws[riga]:
+                cell.fill = fill
+        ws.cell(row=riga, column=c_stato).value = r.status
+        ws.cell(row=riga, column=c_note).value = r.note
+        ws.cell(row=riga, column=c_data).value = adesso
+
     _salva_atomico(wb, path)
 
 
@@ -898,7 +981,7 @@ def main():
     parser.add_argument("--title-col", default="Track Title")
     parser.add_argument("--writer-col", default="Surname", help="Colonna cognome autore, usata come fallback allo Stage 2 se Publisher Name ('LOO') non trova un risultato univoco")
     parser.add_argument("--publisher-col", default="Publisher Name", help="Non usato per la ricerca (si usa il valore fisso 'LOO'), tenuto solo per riferimento nel report")
-    parser.add_argument("--output", default="mlc_match_results.xlsx")
+    parser.add_argument("--output", default=None, help=f"File del report di questa run (default: {CARTELLA_REPORT}/report-<data>.xlsx)")
     parser.add_argument("--headless", action="store_true", help="Esegui senza finestra browser visibile")
     parser.add_argument("--skip-ambigui", action="store_true", help="Salta anche la coda manuale di fine run: le righe ambigue restano segnate ambiguous_work nel report, da sistemare in un secondo momento")
     parser.add_argument("--colora-catalogo", action="store_true", help="Colora direttamente il file di input riga per riga (con backup automatico) e riprende da dove si era arrivati, saltando cio' che e' gia' colorato")
@@ -911,18 +994,26 @@ def main():
     if not email or not password:
         sys.exit("Imposta le variabili d'ambiente MLC_EMAIL e MLC_PASSWORD prima di avviare lo script.")
 
-    wb = ws = None
+    # i file di servizio stanno in due sottocartelle, cosi' nella cartella
+    # di lavoro resta in vista solo il catalogo
+    if args.output is None:
+        os.makedirs(CARTELLA_REPORT, exist_ok=True)
+        args.output = os.path.join(CARTELLA_REPORT, f"report-{time.strftime('%Y%m%d-%H%M%S')}.xlsx")
+
+    wb = ws = header = None
     if args.colora_catalogo:
         # il catalogo e' il file di lavoro dell'utente: si lavora sempre su
         # una copia di sicurezza fatta prima di toccarlo
-        backup = f"{Path(args.input_file).stem}.backup-{time.strftime('%Y%m%d-%H%M%S')}.xlsx"
+        os.makedirs(CARTELLA_BACKUP, exist_ok=True)
+        backup = os.path.join(CARTELLA_BACKUP,
+                              f"{Path(args.input_file).stem}-{time.strftime('%Y%m%d-%H%M%S')}.xlsx")
         shutil.copy2(args.input_file, backup)
         print(f"Backup del catalogo: {backup}")
 
-        wb, ws, tasks, gia_fatte = carica_catalogo(
+        wb, ws, header, tasks, gia_fatte = carica_catalogo(
             args.input_file, args.sheet, args.isrc_col, args.title_col,
             args.writer_col, args.publisher_col, args.rifai_tutto)
-        print(f"Tracce nel catalogo: {len(tasks) + gia_fatte} | gia' evase (colorate): {gia_fatte} | da processare: {len(tasks)}")
+        print(f"Tracce nel catalogo: {len(tasks) + gia_fatte} | gia' evase: {gia_fatte} | da processare: {len(tasks)}")
         if args.limite is not None and args.limite < len(tasks):
             print(f"Limite attivo: se ne fanno {args.limite}, ne restano {len(tasks) - args.limite} per i prossimi giri.")
             tasks = tasks[:args.limite]
@@ -933,6 +1024,9 @@ def main():
         if args.limite is not None:
             tasks = tasks[:args.limite]
         print(f"Righe da processare: {len(tasks)}")
+
+    _installa_stop_pulito()
+    _pulisci_temporanei(args.output, args.input_file)
 
     results = []
     interrotto = False
@@ -945,38 +1039,52 @@ def main():
             # Prima passata: nessuna pausa, cosi' il lotto gira da solo.
             # Le righe che richiedono un occhio umano vengono messe da parte.
             for i, task in enumerate(tasks, 1):
+                if _stop_richiesto:
+                    interrotto = True
+                    break
                 print(f"[{i}/{len(tasks)}] ISRC={task.isrc} Title={task.title} Writer={task.writer}")
                 r = process_row(page, task.isrc, task.title, task.writer, task.publisher, interattivo=False)
                 print(f"  -> {r.status} ({r.note})")
                 results.append(r)
                 _save_report(args.output, results)  # salvataggio dopo ogni riga
                 if ws is not None:
-                    _colora_catalogo(wb, ws, args.input_file, task, r.status)
+                    _aggiorna_catalogo(wb, ws, header, args.input_file, task, r)
 
             # Seconda passata: le sole righe ambigue, tutte in coda, quando il
             # grosso del lavoro e' gia' fatto e salvato
             da_rivedere = [(t, r) for t, r in zip(tasks, results) if r.status == "ambiguous_work"]
-            if da_rivedere and not args.skip_ambigui:
+            if da_rivedere and not args.skip_ambigui and not _stop_richiesto:
                 print(f"\n{'=' * 60}")
                 print(f"Restano {len(da_rivedere)} tracce da scegliere a mano.")
                 print(f"{'=' * 60}")
                 for n, (task, r) in enumerate(da_rivedere, 1):
+                    if _stop_richiesto:
+                        interrotto = True
+                        break
                     print(f"\n[manuale {n}/{len(da_rivedere)}] ISRC={r.isrc} Title={r.title}")
                     nuovo = process_row(page, r.isrc, r.title, r.writer, r.publisher, interattivo=True)
                     print(f"  -> {nuovo.status} ({nuovo.note})")
                     r.status, r.note = nuovo.status, nuovo.note
                     _save_report(args.output, results)
                     if ws is not None:
-                        _colora_catalogo(wb, ws, args.input_file, task, r.status)
+                        _aggiorna_catalogo(wb, ws, header, args.input_file, task, r)
             elif da_rivedere:
-                print(f"\n{len(da_rivedere)} tracce ambigue lasciate da rivedere a mano (--skip-ambigui).")
+                print(f"\n{len(da_rivedere)} tracce ambigue lasciate da rivedere a mano.")
 
             browser.close()
     except KeyboardInterrupt:
         interrotto = True
-        print("\nInterrotto: i risultati delle tracce gia' processate sono stati salvati.")
+        print("\nUscita immediata richiesta.")
 
-    out_df = _save_report(args.output, results)
+    # il salvataggio finale non deve mai far esplodere l'uscita: quanto
+    # elaborato e' gia' su disco dopo ogni traccia
+    try:
+        out_df = _save_report(args.output, results)
+    except (KeyboardInterrupt, Exception) as e:
+        print(f"\nSalvataggio finale non riuscito ({type(e).__name__}), ma i dati delle tracce processate sono gia' su disco.")
+        _pulisci_temporanei(args.output, args.input_file)
+        return
+
     if out_df.empty:
         print("\nNessuna traccia processata, report non scritto.")
         return
@@ -990,4 +1098,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # rete di sicurezza: un Ctrl+C non deve mai finire in un traceback, che
+    # spaventa e nasconde il messaggio utile
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nInterrotto.")
+        sys.exit(130)
