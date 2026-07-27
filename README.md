@@ -311,6 +311,20 @@ cambiare:
     per lo Stage 1, `/search/works/catalog` per lo Stage 2) e poi il render:
     aspettare la risposta nuova evita anche di leggere per sbaglio i
     risultati della ricerca precedente rimasti a schermo.
+19. **Il caso "un solo risultato" va provato a parte** (bug grave, sfuggito
+    ai test): l'estrazione delle schede risaliva il DOM fino all'antenato
+    comune a tutti i risultati, ma con UN SOLO risultato quell'antenato e'
+    il link stesso, la risalita non trovava mai il confine e arrivava fino a
+    `<html>`. Il titolo letto era la prima intestazione della pagina
+    ("Inbox", dal widget notifiche), quindi ogni traccia con un solo
+    risultato finiva `no_match_work`. Verificato sull'ISRC `US83Z2309029`
+    (SUNRISE) confrontando vecchio e nuovo codice sullo stesso DOM. Ora la
+    risalita si ferma anche sull'intestazione "Showing 1 - N of N results".
+    I test erano passati perche' provavano solo casi con 2+ risultati.
+20. **Salvataggi atomici**: scrivendo il report dopo ogni riga, un Ctrl+C a
+    meta' scrittura lascia il file troncato - e' successo davvero a
+    `report_catalogo.xlsx`. Report e catalogo si scrivono ora su un
+    temporaneo sostituito con `os.replace`, che e' atomico.
 
 ## Sicurezza
 

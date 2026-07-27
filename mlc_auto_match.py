@@ -414,19 +414,29 @@ def _count_work_results(page: Page) -> int:
     return page.locator("#select-link").count()
 
 
-# estrae il testo di ogni scheda risultato dello Stage 2: si risale dal
-# 'select-link' fino al primo antenato comune a tutti i risultati, la scheda
-# di ciascuno e' il figlio diretto di quell'antenato che lo contiene. Cosi'
-# non serve conoscere la profondita' esatta del DOM.
+# Estrae titolo e dati di ogni scheda risultato dello Stage 2 partendo dal
+# suo 'select-link' e risalendo il DOM, senza dover conoscere la profondita'
+# esatta della pagina. La risalita si ferma quando il genitore inglobrerebbe
+# un ALTRO risultato oppure l'intestazione "Showing 1 - N of N results".
+#
+# Il secondo limite e' indispensabile col risultato singolo: senza altri
+# link a fare da confine la risalita arrivava fino a <html> e il "titolo"
+# letto era un'intestazione qualsiasi della pagina, mai uguale a quello
+# cercato. Effetto: ogni traccia con UN SOLO risultato veniva marcata
+# no_match_work (bug osservato sull'ISRC US83Z2309029 / SUNRISE, che a
+# schermo mostrava un risultato corretto).
 _WORK_CARDS_JS = """() => {
   const links = [...document.querySelectorAll('#select-link')];
   if (links.length === 0) return [];
-  let lca = links[0];
-  while (lca && !links.every(l => lca.contains(l))) lca = lca.parentElement;
-  if (!lca) return [];
+  const intestazione = /Showing\\s+\\d+\\s*-\\s*\\d+\\s+of\\s+\\d+\\s+results/i;
   return links.map(l => {
     let card = l;
-    while (card.parentElement && card.parentElement !== lca) card = card.parentElement;
+    while (card.parentElement) {
+      const padre = card.parentElement;
+      if (links.some(x => x !== l && padre.contains(x))) break;
+      if (intestazione.test(padre.innerText || '')) break;
+      card = padre;
+    }
     const titoli = [...card.querySelectorAll('h1,h2,h3,h4,h5,h6')]
       .map(h => h.innerText.trim())
       .filter(t => t && t.toUpperCase() !== 'SELECT');
@@ -824,6 +834,20 @@ def carica_catalogo(path: str, sheet, isrc_col: str, title_col: str, writer_col:
     return wb, ws, da_fare, gia_fatte
 
 
+def _salva_atomico(wb, path: str) -> None:
+    """
+    Salva scrivendo prima un file temporaneo e sostituendo poi l'originale.
+
+    Salvando dopo ogni traccia, un Ctrl+C che cade proprio durante la
+    scrittura lascerebbe il file troncato e illeggibile: e' gia' successo al
+    report durante una run interrotta. os.replace e' atomico, quindi o si
+    vede il file vecchio o quello nuovo, mai uno a meta'.
+    """
+    tmp = f"{path}.tmp"
+    wb.save(tmp)
+    os.replace(tmp, path)
+
+
 def _colora_catalogo(wb, ws, path: str, task: Task, status: str) -> None:
     """Colora tutte le righe della traccia e salva subito il catalogo, cosi'
     l'avanzamento e' visibile anche a run in corso."""
@@ -833,7 +857,7 @@ def _colora_catalogo(wb, ws, path: str, task: Task, status: str) -> None:
     for riga in task.righe:
         for cell in ws[riga]:
             cell.fill = fill
-    wb.save(path)
+    _salva_atomico(wb, path)
 
 
 def _save_report(path: str, results: list) -> pd.DataFrame:
@@ -845,8 +869,14 @@ def _save_report(path: str, results: list) -> pd.DataFrame:
     out_df = pd.DataFrame([r.__dict__ for r in results])
     if out_df.empty:
         return out_df
-    out_df.to_excel(path, index=False)
-    _color_report(path, out_df)
+
+    # stessa cautela del catalogo: si scrive a lato e si sostituisce alla
+    # fine, altrimenti un'interruzione durante la scrittura lascia un file
+    # corrotto (successo davvero su una run interrotta)
+    tmp = f"{path}.tmp"
+    out_df.to_excel(tmp, index=False)
+    _color_report(tmp, out_df)
+    os.replace(tmp, path)
     return out_df
 
 
