@@ -595,6 +595,11 @@ def stage2_search_work(page: Page, title: str, writer: str, publisher: str, inte
         tentativi.append(("Writer Name", writer))
 
     cards, indice, motivo, criterio = [], TITOLO_ASSENTE, "nessun risultato", ""
+    # si tiene traccia di COME e' andato ogni tentativo: la sola nota
+    # dell'ultimo nasconderebbe che il primo aveva magari trovato risultati,
+    # solo con titoli diversi - informazione utile per valutare le righe
+    # gialle senza rifare la ricerca a mano
+    dettagli = []
 
     for nome_criterio, valore in tentativi:
         criterio = f"Titolo + {nome_criterio} ('{valore}')"
@@ -602,21 +607,24 @@ def stage2_search_work(page: Page, title: str, writer: str, publisher: str, inte
 
         if run_search(page) == "no_results":
             cards, indice, motivo = [], TITOLO_ASSENTE, "nessun risultato"
+            dettagli.append(f"{nome_criterio}('{valore}'): nessun risultato")
             continue
 
         cards = page.evaluate(_WORK_CARDS_JS)
         if not cards:
             indice, motivo = TITOLO_ASSENTE, "nessun risultato"
+            dettagli.append(f"{nome_criterio}('{valore}'): nessun risultato")
             continue
 
         indice, motivo = _scegli_opera(cards, title)
+        dettagli.append(f"{nome_criterio}('{valore}'): {motivo}")
         if indice >= 0:
             break  # trovata: il tentativo successivo non serve
 
     if indice == TITOLO_ASSENTE:
         # nessun risultato col titolo cercato: l'opera non e' a catalogo su
         # MLC, non c'e' niente da chiedere - si va avanti
-        return "no_match", f"{motivo} ({criterio})"
+        return "no_match", " ; ".join(dettagli)
 
     if indice == SCELTA_UMANA:
         if not interattivo:
@@ -843,7 +851,9 @@ def _salva_atomico(wb, path: str) -> None:
     report durante una run interrotta. os.replace e' atomico, quindi o si
     vede il file vecchio o quello nuovo, mai uno a meta'.
     """
-    tmp = f"{path}.tmp"
+    # il temporaneo mantiene l'estensione .xlsx: pandas e openpyxl deducono
+    # il formato da li' e con un '.tmp' finale fallirebbero
+    tmp = f"{path}.tmp.xlsx"
     wb.save(tmp)
     os.replace(tmp, path)
 
@@ -873,7 +883,7 @@ def _save_report(path: str, results: list) -> pd.DataFrame:
     # stessa cautela del catalogo: si scrive a lato e si sostituisce alla
     # fine, altrimenti un'interruzione durante la scrittura lascia un file
     # corrotto (successo davvero su una run interrotta)
-    tmp = f"{path}.tmp"
+    tmp = f"{path}.tmp.xlsx"
     out_df.to_excel(tmp, index=False)
     _color_report(tmp, out_df)
     os.replace(tmp, path)
