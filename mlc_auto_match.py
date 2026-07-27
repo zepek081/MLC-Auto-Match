@@ -47,6 +47,7 @@ import argparse
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -72,7 +73,7 @@ YELLOW_FILL = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="s
 ORANGE_FILL = PatternFill(start_color="FFC7A0", end_color="FFC7A0", fill_type="solid")
 GREEN_STATUSES = {"matched", "already_submitted"}
 YELLOW_STATUSES = {"no_match_recording", "no_match_work"}
-ORANGE_STATUSES = {"submit_failed", "error"}
+ORANGE_STATUSES = {"submit_failed", "manual_incomplete", "error"}
 
 
 @dataclass
@@ -83,7 +84,8 @@ class RowResult:
     publisher: str
     status: str = "pending"
     # matched / no_match_recording / no_match_work / already_submitted /
-    # ambiguous_recording / ambiguous_work / submit_failed / error
+    # ambiguous_recording / ambiguous_work / submit_failed /
+    # manual_incomplete / error
     note: str = ""
 
 
@@ -444,13 +446,67 @@ def _work_results_are_identical(page: Page) -> bool:
 PUBLISHER_DEFAULT_VALUE = "LOO"  # copre "LOOSE CLUB EDITION" a prescindere dal publisher esatto in riga
 
 
-def stage2_search_work(page: Page, title: str, writer: str, publisher: str) -> tuple[str, str]:
+def _wait_for_any(page: Page, candidates: dict, timeout_ms: int) -> str:
+    """
+    Attende che compaia UNO qualsiasi degli elementi passati e ne ritorna il
+    nome, oppure '' se scade il tempo. Serve quando lo stato della pagina non
+    e' prevedibile in anticipo (tipico dopo una pausa manuale: l'utente puo'
+    aver lasciato aperto il dialog di conferma oppure aver gia' confermato).
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        for nome, locator in candidates.items():
+            try:
+                if locator.count() > 0 and locator.first.is_visible():
+                    return nome
+            except Exception:
+                pass
+        page.wait_for_timeout(250)
+    return ""
+
+
+def _finalize_match(page: Page, note: str) -> tuple[str, str]:
+    """
+    Chiude il match dopo che l'opera e' stata selezionata.
+
+    Non si assume in che stato sia la pagina: dopo una pausa manuale l'utente
+    puo' aver cliccato solo "Select" (dialog di conferma aperto) oppure aver
+    gia' fatto Confirm da solo (schermata di successo con "Done"). Cliccare
+    "Confirm" alla cieca in quel secondo caso costava 30s di timeout e un
+    finto errore (osservato live su una run da 40 righe).
+    """
+    confirm = page.get_by_role("button", name="Confirm")
+    done = page.get_by_role("button", name="Done")
+
+    stato = _wait_for_any(page, {"confirm": confirm, "done": done}, 10000)
+
+    if stato == "":
+        return "manual_incomplete", (
+            "nessun dialog di conferma ne' schermata di successo dopo la selezione: "
+            f"opera probabilmente non selezionata - {note}"
+        )
+
+    if stato == "confirm":
+        confirm.click()
+        # Il portale MLC a volte rifiuta l'invio lato server (HTTP 400
+        # "Failed to contact recordings API") SENZA mostrare nulla a schermo:
+        # il dialog resta aperto coi pulsanti spariti e "Done" non arriva mai.
+        if _wait_for_any(page, {"done": done}, 15000) == "":
+            return "submit_failed", f"MLC ha rifiutato l'invio (nessuna conferma dopo il Confirm) - {note}"
+
+    done.click()
+    return "matched", note
+
+
+def stage2_search_work(page: Page, title: str, writer: str, publisher: str, skip_ambigui: bool = False) -> tuple[str, str]:
     """
     Prova prima Titolo + Publisher Name ('LOO' fisso). Se non trova nulla o
     e' ambiguo (piu' di un risultato) e il writer e' disponibile in input,
     ritenta con Titolo + Writer Name (cognome autore), piu' selettivo sui
     titoli generici dove il publisher da solo non discrimina.
-    Ritorna (esito, nota). Esito: 'matched' / 'no_match' / 'ambiguous'
+    Ritorna (esito, nota).
+    Esito: 'matched' / 'no_match' / 'ambiguous' / 'submit_failed' /
+           'manual_incomplete'
     """
     title_box = page.get_by_test_id("search.0.searchTerm")
     title_box.click()
@@ -479,6 +535,9 @@ def stage2_search_work(page: Page, title: str, writer: str, publisher: str) -> t
         # non c'e' una scelta vera da fare
         page.locator("#select-link").first.click()
         note = f"{count} registrazioni doppie della stessa opera, selezionata la prima - {note}"
+    elif count > 1 and skip_ambigui:
+        # modalita' non presidiata: la riga viene segnata e rivista a fine run
+        return "ambiguous", f"{count} opere diverse trovate con Titolo + {used_criteria} ('{used_value}'): scelta manuale da fare a mano"
     elif count > 1:
         print(f"    -> {count} opere DIVERSE trovate per '{title}' / {used_criteria}='{used_value}': controlla a schermo.")
         input("       Seleziona manualmente l'opera corretta nel browser, poi premi invio qui per continuare...")
@@ -486,29 +545,14 @@ def stage2_search_work(page: Page, title: str, writer: str, publisher: str) -> t
     else:
         page.locator("#select-link").first.click()
 
-    page.get_by_role("button", name="Confirm").click()
-
-    # Il portale MLC a volte rifiuta l'invio lato server (osservato:
-    # HTTP 400 "Failed to contact recordings API" su
-    # POST /current/matching/suggestions) SENZA mostrare alcun errore a
-    # schermo: il dialog di conferma resta aperto coi pulsanti spariti e la
-    # schermata di successo non arriva mai. Va distinto da un errore nostro,
-    # altrimenti si aspettano 30s per poi segnare un generico 'error'.
-    done_button = page.get_by_role("button", name="Done")
-    try:
-        done_button.wait_for(timeout=15000)
-    except PWTimeout:
-        return "submit_failed", f"MLC ha rifiutato l'invio (nessuna conferma dopo il Confirm) - {note}"
-
-    done_button.click()
-    return "matched", note
+    return _finalize_match(page, note)
 
 
 # ---------------------------------------------------------------------------
 # Orchestrazione riga per riga
 # ---------------------------------------------------------------------------
 
-def process_row(page: Page, isrc: str, title: str, writer: str, publisher: str) -> RowResult:
+def process_row(page: Page, isrc: str, title: str, writer: str, publisher: str, skip_ambigui: bool = False) -> RowResult:
     result = RowResult(isrc=isrc, title=title, writer=writer, publisher=publisher)
     try:
         if not isrc:
@@ -538,7 +582,7 @@ def process_row(page: Page, isrc: str, title: str, writer: str, publisher: str) 
             return result
 
         # Stage 1 ok -> procedi con Stage 2
-        stage2_status, stage2_note = stage2_search_work(page, title, writer, publisher)
+        stage2_status, stage2_note = stage2_search_work(page, title, writer, publisher, skip_ambigui)
         result.note = stage2_note
 
         if stage2_status == "matched":
@@ -547,17 +591,20 @@ def process_row(page: Page, isrc: str, title: str, writer: str, publisher: str) 
         elif stage2_status == "no_match":
             result.status = "no_match_work"
             abandon_stage2(page)
-        elif stage2_status == "submit_failed":
-            # la UI resta bloccata sul dialog di conferma: solo un reload
-            # completo rimette la pagina in uno stato usabile
-            result.status = "submit_failed"
+        elif stage2_status in ("submit_failed", "manual_incomplete"):
+            # la UI resta in uno stato intermedio (dialog bloccato o selezione
+            # a meta'): solo un reload completo la rimette in sesto
+            result.status = stage2_status
             page.reload(wait_until="networkidle")
             _dismiss_cookies(page)
             page.get_by_role("link", name="Matching Tool", exact=True).click()
             page.wait_for_load_state("networkidle")
         else:
+            # ambiguous_work: nessun match confermato, quindi i gruppi
+            # recording sono ancora selezionati e vanno deselezionati come
+            # per no_match_work, altrimenti restano agganciati alla riga dopo
             result.status = "ambiguous_work"
-            reset_search_form(page)
+            abandon_stage2(page)
 
         return result
 
@@ -630,6 +677,20 @@ def _color_report(path: str, df: pd.DataFrame) -> None:
     wb.save(path)
 
 
+def _save_report(path: str, results: list) -> pd.DataFrame:
+    """
+    Scrive il report su disco. Viene richiamato dopo OGNI riga, non solo a
+    fine run: su lotti lunghi (40+ righe, con pause manuali in mezzo) un
+    Ctrl+C o un crash altrimenti butterebbe via tutto il lavoro gia' fatto.
+    """
+    out_df = pd.DataFrame([r.__dict__ for r in results])
+    if out_df.empty:
+        return out_df
+    out_df.to_excel(path, index=False)
+    _color_report(path, out_df)
+    return out_df
+
+
 def main():
     parser = argparse.ArgumentParser(description="Automazione matching su The MLC Matching Tool")
     parser.add_argument("input_file", help="Percorso Excel/CSV con il catalogo da matchare")
@@ -640,6 +701,7 @@ def main():
     parser.add_argument("--publisher-col", default="Publisher Name", help="Non usato per la ricerca (si usa il valore fisso 'LOO'), tenuto solo per riferimento nel report")
     parser.add_argument("--output", default="mlc_match_results.xlsx")
     parser.add_argument("--headless", action="store_true", help="Esegui senza finestra browser visibile")
+    parser.add_argument("--skip-ambigui", action="store_true", help="Non fermarsi sulle righe con piu' opere diverse: le segna ambiguous_work e prosegue, utile per lotti lunghi da lasciare non presidiati")
     args = parser.parse_args()
 
     email = os.environ.get("MLC_EMAIL")
@@ -651,23 +713,33 @@ def main():
     print(f"Righe da processare: {len(df)}")
 
     results = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=args.headless)
-        page = browser.new_page()
-        login(page, email, password)
+    interrotto = False
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=args.headless)
+            page = browser.new_page()
+            login(page, email, password)
 
-        for i, row in df.iterrows():
-            print(f"[{i + 1}/{len(df)}] ISRC={row['isrc']} Title={row['title']} Writer={row['writer']}")
-            r = process_row(page, row["isrc"], row["title"], row["writer"], row["publisher"])
-            print(f"  -> {r.status} ({r.note})")
-            results.append(r)
+            for i, row in df.iterrows():
+                print(f"[{i + 1}/{len(df)}] ISRC={row['isrc']} Title={row['title']} Writer={row['writer']}")
+                r = process_row(page, row["isrc"], row["title"], row["writer"], row["publisher"], args.skip_ambigui)
+                print(f"  -> {r.status} ({r.note})")
+                results.append(r)
+                _save_report(args.output, results)  # salvataggio dopo ogni riga
 
-        browser.close()
+            browser.close()
+    except KeyboardInterrupt:
+        interrotto = True
+        print("\nInterrotto: i risultati delle righe gia' processate sono stati salvati.")
 
-    out_df = pd.DataFrame([r.__dict__ for r in results])
-    out_df.to_excel(args.output, index=False)
-    _color_report(args.output, out_df)
+    out_df = _save_report(args.output, results)
+    if out_df.empty:
+        print("\nNessuna riga processata, report non scritto.")
+        return
+
     print(f"\nReport salvato in: {args.output}")
+    if interrotto:
+        print(f"Righe processate: {len(results)} su {len(df)}")
     print(out_df["status"].value_counts())
 
 

@@ -83,15 +83,23 @@ Parametri principali:
 - `--output` file Excel con il report finale
 - `--headless` esegue senza finestra visibile (sconsigliato al primo utilizzo,
   utile a regime una volta verificato che funziona)
+- `--skip-ambigui` non si ferma sulle righe con piu' opere diverse: le segna
+  `ambiguous_work` e prosegue. Serve per lotti lunghi da lasciare non
+  presidiati, poi si rivedono tutte insieme dal report
+
+Il report viene riscritto **dopo ogni riga**, non solo a fine run: su lotti
+lunghi un Ctrl+C o un crash non fa perdere il lavoro gia' fatto. Se
+interrompi, il file contiene le righe processate fino a quel momento.
 
 ## Stati possibili nel report
 
 Il file Excel di output colora automaticamente ogni riga come nel flusso
 manuale: **verde** per `matched` e `already_submitted`, **giallo** per
-`no_match_recording` e `no_match_work`, **arancione** per `submit_failed` e
-`error` (tentativi falliti da ritentare - tenerli distinti dal giallo, che
-significa "opera non presente a catalogo"). Gli stati `ambiguous_*` restano
-senza colore e richiedono la lettura della colonna `note`.
+`no_match_recording` e `no_match_work`, **arancione** per `submit_failed`,
+`manual_incomplete` e `error` (tentativi falliti da ritentare - tenerli
+distinti dal giallo, che significa "opera non presente a catalogo"). Gli
+stati `ambiguous_*` restano senza colore e richiedono la lettura della
+colonna `note`.
 
 - `matched` - Stage 1 e Stage 2 completati, match confermato
 - `no_match_recording` - ISRC non trovato in MLC, nessuna registrazione
@@ -118,7 +126,12 @@ senza colore e richiedono la lettura della colonna `note`.
   mano funzionano, e' un problema di attesa: vedi punto 18
 - `ambiguous_work` - piu' di un'opera trovata con lo stesso titolo/criterio
   anche dopo il fallback su Writer, richiede scelta manuale (lo script si
-  ferma e aspetta la tua selezione a schermo prima di continuare)
+  ferma e aspetta la tua selezione a schermo prima di continuare, oppure la
+  segna e prosegue se hai passato `--skip-ambigui`)
+- `manual_incomplete` - dopo una pausa manuale non e' stata trovata ne' la
+  finestra di conferma ne' la schermata di successo: quasi sempre significa
+  che l'invio e' stato dato senza aver selezionato un'opera. La riga va
+  rifatta
 - `error` - eccezione imprevista, dettaglio nella colonna `note`
 
 ## Comportamento sulle righe ambigue
