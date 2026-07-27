@@ -106,11 +106,12 @@ colonna `note`.
 - `already_submitted` - il gruppo recording per questo ISRC risulta gia'
   "Submitted"/"Accepted"/"Rejected" da una sessione precedente: nessuna
   azione necessaria, riga gia' processata in passato
-- `no_match_work` - la registrazione e' stata trovata (Stage 1 ok) ma nessuna
-  opera nel tuo catalogo corrisponde ne' a Titolo+Publisher("LOO") ne' a
-  Titolo+Writer: probabilmente l'opera non e' ancora registrata su MLC, serve
+- `no_match_work` - la registrazione e' stata trovata (Stage 1 ok) ma
+  nessuna opera col titolo cercato compare ne' con Titolo+Publisher("LOO")
+  ne' con Titolo+Writer: l'opera non e' ancora registrata su MLC, serve
   verifica manuale (es. tramite Works Registration), non e' un errore dello
-  script
+  script. Attenzione: MLC puo' restituire comunque dei risultati, ma con
+  titoli diversi da quello cercato - contano solo quelli col titolo giusto
 - `submit_failed` - il match e' stato compilato correttamente ma **MLC ha
   rifiutato l'invio lato server**: il loro backend risponde HTTP 400
   ("Failed to contact recordings API") su
@@ -134,20 +135,42 @@ colonna `note`.
   rifatta
 - `error` - eccezione imprevista, dettaglio nella colonna `note`
 
-## Comportamento sulle righe ambigue
+## Comportamento sulle righe con piu' risultati
 
-Con piu' risultati nello Stage 2 lo script distingue due casi:
+La ricerca titolo di MLC lavora **per parole singole**, quindi restituisce
+regolarmente opere completamente scorrelate: cercando "The FunKing" tornano
+anche THE DRUMMER, THE PRESSURE, THE CREATOR, THE SIDEWINTER (caso reale,
+ISRC `GBKQU1217011`). Il numero di risultati da solo non dice quindi nulla:
+va guardato **quale ha davvero il titolo giusto**.
 
-**Registrazioni doppie della stessa opera** - stesso titolo, stessi autori,
-stesso publisher, ma MLC Song Code diversi (caso reale: PLAYBOOYZ, `PN8C4S`
-con 7 recordings e `PN8DH1` con 6). Non c'e' una scelta vera da fare: prende
-la prima e lo annota nel report. Il confronto ignora di proposito Song Code,
-Member's Song ID e numero di recordings/artisti collegati, che sono dati
-della singola registrazione e non dell'opera.
+Lo script confronta il titolo di ogni risultato con quello cercato,
+normalizzando accenti, maiuscole, punteggiatura e apostrofi (cosi'
+"Killer Instinct - Feb Br Remix" e "KILLER INSTINCT (FEB BR REMIX)" sono lo
+stesso titolo). Poi:
 
-**Opere davvero diverse** - cambia il titolo, l'autore o il publisher. Qui lo
-script NON sceglie da solo: si ferma, ti chiede di selezionare a mano nel
-browser visibile, poi continua alla pressione di invio nel terminale.
+- **un solo risultato col titolo esatto** - lo seleziona, ignorando gli altri
+- **piu' risultati col titolo esatto, stessa opera** - stesso autore e
+  publisher, differiscono solo per Song Code (caso reale: PLAYBOOYZ,
+  `PN8C4S` con 7 recordings e `PN8DH1` con 6): sono registrazioni doppie,
+  prende la prima
+- **nessun risultato col titolo cercato** - l'opera non e' a catalogo su
+  MLC: riga `no_match_work` (gialla) e si va avanti, non c'e' niente da
+  chiedere
+- **piu' opere omonime ma diverse** (stesso titolo, autore o publisher
+  differenti) - e' l'unico caso in cui serve un occhio umano: la riga
+  finisce nella coda manuale
+
+Il controllo del titolo vale **anche quando il risultato e' uno solo**: con
+la ricerca per parole singole di MLC, un unico risultato non e' affatto
+garanzia che sia quello giusto.
+
+## Le righe da scegliere a mano non interrompono il lotto
+
+La prima passata gira **senza mai fermarsi**: le righe che richiedono un
+occhio umano vengono messe da parte e segnate `ambiguous_work`. Solo alla
+fine, quando il grosso e' gia' fatto e salvato, lo script le ripropone una
+per una chiedendoti di selezionare nel browser. Con `--skip-ambigui` salta
+anche quella coda e le lascia nel report per un secondo momento.
 
 ## Assunzioni da verificare al primo run
 

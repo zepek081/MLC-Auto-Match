@@ -48,6 +48,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -407,7 +408,13 @@ _WORK_CARDS_JS = """() => {
   return links.map(l => {
     let card = l;
     while (card.parentElement && card.parentElement !== lca) card = card.parentElement;
-    return card.innerText.replace(/\\s+/g, ' ').trim().toUpperCase();
+    const titoli = [...card.querySelectorAll('h1,h2,h3,h4,h5,h6')]
+      .map(h => h.innerText.trim())
+      .filter(t => t && t.toUpperCase() !== 'SELECT');
+    return {
+      title: titoli.length ? titoli[0] : '',
+      text: card.innerText.replace(/\\s+/g, ' ').trim().toUpperCase()
+    };
   });
 }"""
 
@@ -430,17 +437,55 @@ def _work_identity_key(card_text: str) -> str:
     return f"{head.strip()}|{publishers.group(1).strip() if publishers else ''}"
 
 
-def _work_results_are_identical(page: Page) -> bool:
+def _norm_title(titolo: str) -> str:
     """
-    True se tutte le schede risultato sono la stessa opera (stesso titolo,
-    stessi autori, stesso publisher): sono doppioni di registrazione, si puo'
-    prendere il primo senza chiedere conferma. Se cambia anche solo l'autore
-    o il publisher sono opere diverse e la scelta resta manuale.
+    Titolo normalizzato per il confronto: senza accenti, maiuscolo, senza
+    punteggiatura e con spazi compattati. Cosi' "Killer Instinct - Feb Br
+    Remix" e "KILLER INSTINCT (FEB BR REMIX)" risultano lo stesso titolo,
+    mentre restano diversi due brani realmente distinti.
     """
-    cards = page.evaluate(_WORK_CARDS_JS)
-    if len(cards) < 2:
-        return False
-    return len({_work_identity_key(c) for c in cards}) == 1
+    t = unicodedata.normalize("NFKD", titolo or "")
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    t = t.upper().replace("’", "'").replace("`", "'")
+    t = re.sub(r"[^A-Z0-9' ]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+# esiti non numerici di _scegli_opera
+TITOLO_ASSENTE = -2   # nessun risultato ha il titolo cercato -> opera non a catalogo
+SCELTA_UMANA = -1     # piu' opere omonime ma diverse -> serve un occhio umano
+
+
+def _scegli_opera(cards: list, titolo_cercato: str) -> tuple[int, str]:
+    """
+    Decide quale risultato selezionare confrontando il TITOLO dell'opera con
+    quello cercato.
+
+    Serve perche' la ricerca titolo di MLC lavora per parole singole e
+    restituisce regolarmente opere completamente scorrelate (cercando "The
+    FunKing" tornano anche THE DRUMMER, THE PRESSURE, THE CREATOR...): il
+    numero di risultati da solo non dice nulla, e nemmeno "un solo risultato"
+    significa "risultato giusto".
+
+    Ritorna (indice, motivo), con indice TITOLO_ASSENTE o SCELTA_UMANA nei
+    casi non decidibili.
+    """
+    target = _norm_title(titolo_cercato)
+    esatti = [i for i, c in enumerate(cards) if _norm_title(c.get("title", "")) == target]
+
+    if not esatti:
+        return TITOLO_ASSENTE, f"nessuno dei {len(cards)} risultati ha il titolo cercato"
+
+    if len(esatti) == 1:
+        return esatti[0], f"unico risultato col titolo esatto su {len(cards)}"
+
+    # piu' risultati col titolo giusto: sono la stessa opera registrata piu'
+    # volte (differiscono solo per Song Code) oppure opere diverse omonime
+    chiavi = {_work_identity_key(cards[i]["text"]) for i in esatti}
+    if len(chiavi) == 1:
+        return esatti[0], f"{len(esatti)} registrazioni doppie della stessa opera, selezionata la prima"
+
+    return SCELTA_UMANA, f"{len(esatti)} opere diverse con lo stesso titolo (autore/publisher differenti)"
 
 
 PUBLISHER_DEFAULT_VALUE = "LOO"  # copre "LOOSE CLUB EDITION" a prescindere dal publisher esatto in riga
@@ -498,12 +543,16 @@ def _finalize_match(page: Page, note: str) -> tuple[str, str]:
     return "matched", note
 
 
-def stage2_search_work(page: Page, title: str, writer: str, publisher: str, skip_ambigui: bool = False) -> tuple[str, str]:
+def stage2_search_work(page: Page, title: str, writer: str, publisher: str, interattivo: bool = False) -> tuple[str, str]:
     """
-    Prova prima Titolo + Publisher Name ('LOO' fisso). Se non trova nulla o
-    e' ambiguo (piu' di un risultato) e il writer e' disponibile in input,
-    ritenta con Titolo + Writer Name (cognome autore), piu' selettivo sui
-    titoli generici dove il publisher da solo non discrimina.
+    Cerca per Titolo + Publisher Name ('LOO' fisso) e, se non basta, ritenta
+    con Titolo + Writer Name (cognome autore), piu' selettivo sui titoli
+    generici dove il publisher da solo non discrimina.
+
+    In entrambi i tentativi la scelta si fa sul TITOLO dei risultati, mai sul
+    loro numero: anche un singolo risultato puo' essere un'opera scorrelata,
+    visto che MLC cerca per parole singole.
+
     Ritorna (esito, nota).
     Esito: 'matched' / 'no_match' / 'ambiguous' / 'submit_failed' /
            'manual_incomplete'
@@ -512,47 +561,52 @@ def stage2_search_work(page: Page, title: str, writer: str, publisher: str, skip
     title_box.click()
     title_box.fill(title)
 
-    used_criteria, used_value = "Publisher Name", PUBLISHER_DEFAULT_VALUE
-    _set_second_criteria(page, used_criteria, used_value)
+    tentativi = [("Publisher Name", PUBLISHER_DEFAULT_VALUE)]
+    if writer:
+        tentativi.append(("Writer Name", writer))
 
-    status = run_search(page)
-    count = _count_work_results(page) if status == "has_results" else 0
+    cards, indice, motivo, criterio = [], TITOLO_ASSENTE, "nessun risultato", ""
 
-    if (status == "no_results" or count != 1) and writer:
-        used_criteria, used_value = "Writer Name", writer
-        _set_second_criteria(page, used_criteria, used_value)
-        status = run_search(page)
-        count = _count_work_results(page) if status == "has_results" else 0
+    for nome_criterio, valore in tentativi:
+        criterio = f"Titolo + {nome_criterio} ('{valore}')"
+        _set_second_criteria(page, nome_criterio, valore)
 
-    if status == "no_results" or count == 0:
-        return "no_match", f"nessun risultato con Titolo + {used_criteria} ('{used_value}')"
+        if run_search(page) == "no_results":
+            cards, indice, motivo = [], TITOLO_ASSENTE, "nessun risultato"
+            continue
 
-    note = f"match su Titolo + {used_criteria} ('{used_value}')"
+        cards = page.evaluate(_WORK_CARDS_JS)
+        if not cards:
+            indice, motivo = TITOLO_ASSENTE, "nessun risultato"
+            continue
 
-    if count > 1 and _work_results_are_identical(page):
-        # registrazioni doppie della stessa opera (stesso titolo, autori e
-        # publisher, differiscono solo per Song Code): si prende la prima,
-        # non c'e' una scelta vera da fare
-        page.locator("#select-link").first.click()
-        note = f"{count} registrazioni doppie della stessa opera, selezionata la prima - {note}"
-    elif count > 1 and skip_ambigui:
-        # modalita' non presidiata: la riga viene segnata e rivista a fine run
-        return "ambiguous", f"{count} opere diverse trovate con Titolo + {used_criteria} ('{used_value}'): scelta manuale da fare a mano"
-    elif count > 1:
-        print(f"    -> {count} opere DIVERSE trovate per '{title}' / {used_criteria}='{used_value}': controlla a schermo.")
+        indice, motivo = _scegli_opera(cards, title)
+        if indice >= 0:
+            break  # trovata: il tentativo successivo non serve
+
+    if indice == TITOLO_ASSENTE:
+        # nessun risultato col titolo cercato: l'opera non e' a catalogo su
+        # MLC, non c'e' niente da chiedere - si va avanti
+        return "no_match", f"{motivo} ({criterio})"
+
+    if indice == SCELTA_UMANA:
+        if not interattivo:
+            # niente pause a meta' lotto: la riga va nella coda di fine run
+            return "ambiguous", f"{motivo} - da scegliere a mano ({criterio})"
+        titoli = " | ".join(c.get("title", "?") for c in cards)
+        print(f"    -> {motivo} per '{title}': {titoli}")
         input("       Seleziona manualmente l'opera corretta nel browser, poi premi invio qui per continuare...")
-        note = f"{count} risultati diversi, scelta manuale - {note}"
-    else:
-        page.locator("#select-link").first.click()
+        return _finalize_match(page, f"scelta manuale fra {len(cards)} risultati - match su {criterio}")
 
-    return _finalize_match(page, note)
+    page.locator("#select-link").nth(indice).click()
+    return _finalize_match(page, f"{motivo} - match su {criterio}")
 
 
 # ---------------------------------------------------------------------------
 # Orchestrazione riga per riga
 # ---------------------------------------------------------------------------
 
-def process_row(page: Page, isrc: str, title: str, writer: str, publisher: str, skip_ambigui: bool = False) -> RowResult:
+def process_row(page: Page, isrc: str, title: str, writer: str, publisher: str, interattivo: bool = False) -> RowResult:
     result = RowResult(isrc=isrc, title=title, writer=writer, publisher=publisher)
     try:
         if not isrc:
@@ -582,7 +636,7 @@ def process_row(page: Page, isrc: str, title: str, writer: str, publisher: str, 
             return result
 
         # Stage 1 ok -> procedi con Stage 2
-        stage2_status, stage2_note = stage2_search_work(page, title, writer, publisher, skip_ambigui)
+        stage2_status, stage2_note = stage2_search_work(page, title, writer, publisher, interattivo)
         result.note = stage2_note
 
         if stage2_status == "matched":
@@ -701,7 +755,7 @@ def main():
     parser.add_argument("--publisher-col", default="Publisher Name", help="Non usato per la ricerca (si usa il valore fisso 'LOO'), tenuto solo per riferimento nel report")
     parser.add_argument("--output", default="mlc_match_results.xlsx")
     parser.add_argument("--headless", action="store_true", help="Esegui senza finestra browser visibile")
-    parser.add_argument("--skip-ambigui", action="store_true", help="Non fermarsi sulle righe con piu' opere diverse: le segna ambiguous_work e prosegue, utile per lotti lunghi da lasciare non presidiati")
+    parser.add_argument("--skip-ambigui", action="store_true", help="Salta anche la coda manuale di fine run: le righe ambigue restano segnate ambiguous_work nel report, da sistemare in un secondo momento")
     args = parser.parse_args()
 
     email = os.environ.get("MLC_EMAIL")
@@ -720,12 +774,30 @@ def main():
             page = browser.new_page()
             login(page, email, password)
 
+            # Prima passata: nessuna pausa, cosi' il lotto gira da solo.
+            # Le righe che richiedono un occhio umano vengono messe da parte.
             for i, row in df.iterrows():
                 print(f"[{i + 1}/{len(df)}] ISRC={row['isrc']} Title={row['title']} Writer={row['writer']}")
-                r = process_row(page, row["isrc"], row["title"], row["writer"], row["publisher"], args.skip_ambigui)
+                r = process_row(page, row["isrc"], row["title"], row["writer"], row["publisher"], interattivo=False)
                 print(f"  -> {r.status} ({r.note})")
                 results.append(r)
                 _save_report(args.output, results)  # salvataggio dopo ogni riga
+
+            # Seconda passata: le sole righe ambigue, tutte in coda, quando il
+            # grosso del lavoro e' gia' fatto e salvato
+            da_rivedere = [r for r in results if r.status == "ambiguous_work"]
+            if da_rivedere and not args.skip_ambigui:
+                print(f"\n{'=' * 60}")
+                print(f"Restano {len(da_rivedere)} righe da scegliere a mano.")
+                print(f"{'=' * 60}")
+                for n, r in enumerate(da_rivedere, 1):
+                    print(f"\n[manuale {n}/{len(da_rivedere)}] ISRC={r.isrc} Title={r.title}")
+                    nuovo = process_row(page, r.isrc, r.title, r.writer, r.publisher, interattivo=True)
+                    print(f"  -> {nuovo.status} ({nuovo.note})")
+                    r.status, r.note = nuovo.status, nuovo.note
+                    _save_report(args.output, results)
+            elif da_rivedere:
+                print(f"\n{len(da_rivedere)} righe ambigue lasciate da rivedere a mano (--skip-ambigui).")
 
             browser.close()
     except KeyboardInterrupt:
