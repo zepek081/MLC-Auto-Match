@@ -115,6 +115,15 @@ complesso invece di doverlo ricostruire dai report dei singoli lotti.
   quello della riga LOOSE CLUB EDITION, l'unico utile come criterio di
   ricerca
 
+Il catalogo si lavora comodamente **a blocchi** con `--limite`:
+
+```
+python mlc_auto_match.py "mlc spreadsheet.xlsx" --colora-catalogo --limite 50 --output report.xlsx
+```
+
+processa 50 tracce e si ferma; il giro successivo riparte automaticamente
+dalla prima non ancora colorata.
+
 ## Stati possibili nel report
 
 Il file Excel di output colora automaticamente ogni riga come nel flusso

@@ -863,6 +863,7 @@ def main():
     parser.add_argument("--skip-ambigui", action="store_true", help="Salta anche la coda manuale di fine run: le righe ambigue restano segnate ambiguous_work nel report, da sistemare in un secondo momento")
     parser.add_argument("--colora-catalogo", action="store_true", help="Colora direttamente il file di input riga per riga (con backup automatico) e riprende da dove si era arrivati, saltando cio' che e' gia' colorato")
     parser.add_argument("--rifai-tutto", action="store_true", help="Con --colora-catalogo: riprocessa anche le righe gia' colorate")
+    parser.add_argument("--limite", type=int, default=None, help="Processa al massimo N tracce e si ferma: utile per lavorare il catalogo a blocchi, il run successivo riprende da dove si era arrivati")
     args = parser.parse_args()
 
     email = os.environ.get("MLC_EMAIL")
@@ -882,10 +883,15 @@ def main():
             args.input_file, args.sheet, args.isrc_col, args.title_col,
             args.writer_col, args.publisher_col, args.rifai_tutto)
         print(f"Tracce nel catalogo: {len(tasks) + gia_fatte} | gia' evase (colorate): {gia_fatte} | da processare: {len(tasks)}")
+        if args.limite is not None and args.limite < len(tasks):
+            print(f"Limite attivo: se ne fanno {args.limite}, ne restano {len(tasks) - args.limite} per i prossimi giri.")
+            tasks = tasks[:args.limite]
     else:
         df = load_input(args.input_file, args.sheet, args.isrc_col, args.title_col, args.writer_col, args.publisher_col)
         tasks = [Task(isrc=r["isrc"], title=r["title"], writer=r["writer"], publisher=r["publisher"], righe=[])
                  for _, r in df.iterrows()]
+        if args.limite is not None:
+            tasks = tasks[:args.limite]
         print(f"Righe da processare: {len(tasks)}")
 
     results = []
