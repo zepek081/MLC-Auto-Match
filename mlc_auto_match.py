@@ -139,7 +139,30 @@ def _dismiss_cookies(page: Page) -> None:
         pass
 
 
-def login(page: Page, email: str, password: str) -> None:
+SESSION_FILE = ".mlc_session.json"
+
+
+def _sessione_attiva(page: Page) -> bool:
+    """
+    True se la sessione salvata dal run precedente e' ancora valida: aprendo
+    il portale compare subito il link Matching Tool, senza login ne' OTP.
+    """
+    page.goto(LOGIN_URL)
+    _dismiss_cookies(page)
+    try:
+        page.get_by_role("link", name="Matching Tool", exact=True).wait_for(timeout=8000)
+        return True
+    except PWTimeout:
+        return False
+
+
+def login(page: Page, email: str, password: str, riusa_sessione: bool = False) -> None:
+    if riusa_sessione and _sessione_attiva(page):
+        print("Sessione salvata ancora valida: login e OTP saltati.")
+        page.get_by_role("link", name="Matching Tool", exact=True).click()
+        page.wait_for_load_state("networkidle")
+        return
+
     page.goto(LOGIN_URL)
     _dismiss_cookies(page)
 
@@ -1033,8 +1056,12 @@ def main():
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=args.headless)
-            page = browser.new_page()
-            login(page, email, password)
+            sessione_salvata = os.path.exists(SESSION_FILE)
+            context = browser.new_context(storage_state=SESSION_FILE if sessione_salvata else None)
+            page = context.new_page()
+            login(page, email, password, riusa_sessione=sessione_salvata)
+            # la sessione salvata evita l'OTP ai run successivi
+            context.storage_state(path=SESSION_FILE)
 
             # Prima passata: nessuna pausa, cosi' il lotto gira da solo.
             # Le righe che richiedono un occhio umano vengono messe da parte.

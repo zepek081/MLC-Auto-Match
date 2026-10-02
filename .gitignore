@@ -12,3 +12,6 @@ __pycache__/
 # copie di sicurezza del catalogo e report delle singole run
 backup/
 report/
+
+# sessione del browser salvata (cookie di login del portale)
+.mlc_session.json
